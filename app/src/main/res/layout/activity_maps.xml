@@ -41,6 +41,7 @@
         android:ems="10"
         android:hint="Dirreccion o lugar"
         android:inputType="text"
+        android:imeOptions="actionSend"
         android:padding="16dp"
         android:background="@drawable/corners"
         android:textColor="@color/white"

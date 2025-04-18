@@ -6,8 +6,13 @@ import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.location.Address
+import android.location.Geocoder
+import android.location.Location
 import android.os.Bundle
 import android.util.Log
+import android.view.inputmethod.EditorInfo
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -25,6 +30,7 @@ class MapsActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private lateinit var mMap: GoogleMap
     private lateinit var binding: ActivityMapsBinding
+    private lateinit var mGeocoder: Geocoder
 
     private lateinit var mLocationRequest: LocationRequest
     private lateinit var mLocationCallback: LocationCallback
@@ -67,13 +73,50 @@ class MapsActivity : AppCompatActivity(), OnMapReadyCallback {
             .setMinUpdateIntervalMillis(2000)
             .build()
 
+        // Inicializar Geocoder
+        mGeocoder = Geocoder(baseContext)
+
+        // Configurar el EditText para capturar cuando el usuario termine de escribir la dirección
+        binding.texto.setOnEditorActionListener { v, actionId, event ->
+            if (actionId == EditorInfo.IME_ACTION_SEND) {
+                val addressString = binding.texto.text.toString()
+                if (!addressString.isEmpty()) {
+                    try {
+                        val addresses = mGeocoder.getFromLocationName(addressString, 2)
+                        if (addresses != null && addresses.isNotEmpty()) {
+                            val address: Address = addresses[0]
+                            val position = LatLng(address.latitude, address.longitude)
+                            if (mMap != null) {
+                                mMap.addMarker(
+                                    MarkerOptions().position(position).title(address.locality)
+                                )
+                                mMap.moveCamera(CameraUpdateFactory.newLatLngZoom(position, 16f))
+                            } else {
+                                Toast.makeText(
+                                    this,
+                                    "No se pudo encontrar la dirección",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e("GEOCODER", "Error al obtener la dirección: ${e.message}")
+                    }
+                }
+                true // Indica que manejaste la acción
+            } else {
+                false // Indica que no manejaste la acción
+            }
+
+        }
+
         mLocationCallback = object : LocationCallback() {
             override fun onLocationResult(locationResult: LocationResult) {
                 val location = locationResult.lastLocation ?: return
                 val latLng = LatLng(location.latitude, location.longitude)
                 mMap.clear()
                 mMap.addMarker(MarkerOptions().position(latLng).title("Mi ubicación"))
-                mMap.moveCamera(CameraUpdateFactory.newLatLngZoom(latLng, 16f))
+                //mMap.moveCamera(CameraUpdateFactory.newLatLngZoom(latLng, 16f))
             }
         }
 
@@ -126,6 +169,7 @@ class MapsActivity : AppCompatActivity(), OnMapReadyCallback {
 
     }
 
+
     private fun requestLocationPermission() {
         when {
             ActivityCompat.checkSelfPermission(
@@ -146,7 +190,18 @@ class MapsActivity : AppCompatActivity(), OnMapReadyCallback {
                 Manifest.permission.ACCESS_FINE_LOCATION
             ) == PackageManager.PERMISSION_GRANTED
         ) {
-            mMap.isMyLocationEnabled = true
+            mMap.isMyLocationEnabled = true // Habilita la localización del usuario en el mapa
+            mMap.uiSettings.isZoomControlsEnabled = true // Muestra los controles de zoom
+            mMap.uiSettings.isMyLocationButtonEnabled = true // Muestra el botón de mi ubicación
+
+            // Mover la cámara a la ubicación actual del usuario
+            mFusedLocationClient.lastLocation.addOnSuccessListener { location: Location? ->
+                location?.let {
+                    val latLng = LatLng(it.latitude, it.longitude)
+                    mMap.moveCamera(CameraUpdateFactory.newLatLngZoom(latLng, 16f)) // Mueve la cámara al lugar con un nivel de zoom
+                    mMap.addMarker(MarkerOptions().position(latLng).title("Tu ubicación")) // Coloca el marcador en la ubicación
+                }
+            }
         }
     }
 
@@ -165,9 +220,62 @@ class MapsActivity : AppCompatActivity(), OnMapReadyCallback {
     override fun onMapReady(googleMap: GoogleMap) {
         mMap = googleMap
         requestLocationPermission()
-        // Inicializar marcador en ubicación por defecto
-        val sydney = LatLng(-34.0, 151.0)
-        mMap.addMarker(MarkerOptions().position(sydney).title("Marker in Sydney"))
-        mMap.moveCamera(CameraUpdateFactory.newLatLng(sydney))
+        enableUserLocation()
+
+        mMap.setOnMapLongClickListener { latLng ->
+            try {
+                val addresses = mGeocoder.getFromLocation(latLng.latitude, latLng.longitude, 1)
+                val addressText = if (!addresses.isNullOrEmpty()) {
+                    val address = addresses[0]
+                    val street = address.thoroughfare ?: ""
+                    val city = address.locality ?: ""
+                    val country = address.countryName ?: ""
+                    "$street, $city, $country".trim().replace(", ,", ",").replace(" ,", "")
+                } else {
+                    "Dirección no disponible"
+                }
+
+                val marker = mMap.addMarker(
+                    MarkerOptions()
+                        .position(latLng)
+                        .title(addressText)
+                )
+
+                marker?.showInfoWindow()
+
+                // Obtener la última ubicación conocida del usuario
+                if (ActivityCompat.checkSelfPermission(
+                        this,
+                        Manifest.permission.ACCESS_FINE_LOCATION
+                    ) == PackageManager.PERMISSION_GRANTED
+                ) {
+                    mFusedLocationClient.lastLocation.addOnSuccessListener { location ->
+                        location?.let {
+                            val userLocation = Location("").apply {
+                                latitude = it.latitude
+                                longitude = it.longitude
+                            }
+
+                            val markerLocation = Location("").apply {
+                                latitude = latLng.latitude
+                                longitude = latLng.longitude
+                            }
+
+                            val distanceInMeters = userLocation.distanceTo(markerLocation)
+                            val distanceInKm = distanceInMeters / 1000
+
+                            Toast.makeText(
+                                this,
+                                "Distancia hasta el marcador: %.2f km".format(distanceInKm),
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("GEOCODER", "Error al obtener dirección desde lat/lng: ${e.message}")
+                Toast.makeText(this, "No se pudo obtener la dirección", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 }
