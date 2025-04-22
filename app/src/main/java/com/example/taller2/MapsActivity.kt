@@ -3,14 +3,19 @@ package com.example.taller2
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.hardware.Sensor
+import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.location.Address
 import android.location.Geocoder
 import android.location.Location
 import android.os.Bundle
+import android.os.StrictMode
 import android.util.Log
+import android.view.GestureDetector
+import android.view.MotionEvent
 import android.view.inputmethod.EditorInfo
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -19,21 +24,22 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.example.taller2.databinding.ActivityMapsBinding
 import com.google.android.gms.location.*
-import com.google.android.gms.maps.CameraUpdateFactory
-import com.google.android.gms.maps.GoogleMap
-import com.google.android.gms.maps.OnMapReadyCallback
-import com.google.android.gms.maps.SupportMapFragment
-import com.google.android.gms.maps.model.LatLng
-import com.google.android.gms.maps.model.MarkerOptions
 import org.json.JSONArray
+import org.osmdroid.bonuspack.routing.OSRMRoadManager
+import org.osmdroid.bonuspack.routing.RoadManager
+import org.osmdroid.config.Configuration
+import org.osmdroid.tileprovider.tilesource.TileSourceFactory
+import org.osmdroid.util.GeoPoint
+import org.osmdroid.views.overlay.Marker
+import org.osmdroid.views.overlay.Polyline
+import org.osmdroid.views.overlay.mylocation.GpsMyLocationProvider
+import org.osmdroid.views.overlay.mylocation.MyLocationNewOverlay
 import java.io.BufferedWriter
 import java.io.File
 import java.io.FileWriter
 import java.util.Date
+class MapsActivity : AppCompatActivity() {
 
-class MapsActivity : AppCompatActivity(), OnMapReadyCallback {
-
-    private lateinit var mMap: GoogleMap
     private lateinit var binding: ActivityMapsBinding
     private lateinit var mGeocoder: Geocoder
     private lateinit var mLocationRequest: LocationRequest
@@ -42,6 +48,10 @@ class MapsActivity : AppCompatActivity(), OnMapReadyCallback {
     private lateinit var sensorManager: SensorManager
     private lateinit var lightSensor: Sensor
     private lateinit var lightSensorListener: SensorEventListener
+    private lateinit var roadManager: OSRMRoadManager
+    private var roadOverlay: Polyline? = null
+    private var myLocationOverlay: MyLocationNewOverlay? = null
+    private var currentLocation: GeoPoint? = null
     private val LIGHT_THRESHOLD = 20f
     private val DISTANCE_THRESHOLD = 30f // 30 metros para guardar nueva ubicación
     private var lastSavedLocation: Location? = null
@@ -60,12 +70,24 @@ class MapsActivity : AppCompatActivity(), OnMapReadyCallback {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Configurar OSMDroid
+        Configuration.getInstance().setUserAgentValue(applicationContext.packageName)
+
+        // Política para permitir llamados de red síncronos (solo para pruebas)
+        val policy = StrictMode.ThreadPolicy.Builder().permitAll().build()
+        StrictMode.setThreadPolicy(policy)
+
         binding = ActivityMapsBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        val mapFragment = supportFragmentManager
-            .findFragmentById(R.id.map) as SupportMapFragment
-        mapFragment.getMapAsync(this)
+        // Configurar el mapa OSM
+        binding.map.setTileSource(TileSourceFactory.MAPNIK)
+        binding.map.setMultiTouchControls(true)
+        binding.map.controller.setZoom(16.0)
+
+        // Inicializar el Road Manager para rutas
+        roadManager = OSRMRoadManager(this, "ANDROID")
 
         mFusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
 
@@ -78,24 +100,13 @@ class MapsActivity : AppCompatActivity(), OnMapReadyCallback {
 
         mGeocoder = Geocoder(baseContext)
 
+        // Configurar la ubicación del usuario en el mapa OSM
+        setupMyLocation()
+
         binding.texto.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == EditorInfo.IME_ACTION_SEND) {
                 val addressString = binding.texto.text.toString()
-                if (addressString.isNotEmpty()) {
-                    try {
-                        val addresses = mGeocoder.getFromLocationName(addressString, 2)
-                        if (!addresses.isNullOrEmpty()) {
-                            val address: Address = addresses[0]
-                            val position = LatLng(address.latitude, address.longitude)
-                            mMap.addMarker(MarkerOptions().position(position).title(address.locality))
-                            mMap.moveCamera(CameraUpdateFactory.newLatLngZoom(position, 16f))
-                        } else {
-                            Toast.makeText(this, "No se pudo encontrar la dirección", Toast.LENGTH_SHORT).show()
-                        }
-                    } catch (e: Exception) {
-                        Log.e("GEOCODER", "Error al obtener la dirección: ${e.message}")
-                    }
-                }
+                searchAddressAndDrawRoute(addressString)
                 true
             } else {
                 false
@@ -105,17 +116,12 @@ class MapsActivity : AppCompatActivity(), OnMapReadyCallback {
         mLocationCallback = object : LocationCallback() {
             override fun onLocationResult(locationResult: LocationResult) {
                 val location = locationResult.lastLocation ?: return
-                val latLng = LatLng(location.latitude, location.longitude)
+                currentLocation = GeoPoint(location.latitude, location.longitude)
 
                 // Verificar si nos hemos movido más de 30 metros desde la última ubicación guardada
                 if (shouldSaveLocation(location)) {
                     // Guardar la nueva ubicación
                     saveLocationToFile(location)
-
-                    // Actualizar el marcador en el mapa
-                    mMap.clear()
-                    mMap.addMarker(MarkerOptions().position(latLng).title("Mi ubicación"))
-                    mMap.moveCamera(CameraUpdateFactory.newLatLngZoom(latLng, 16f))
 
                     // Actualizar la última ubicación guardada
                     lastSavedLocation = location
@@ -124,25 +130,63 @@ class MapsActivity : AppCompatActivity(), OnMapReadyCallback {
         }
 
         lightSensorListener = object : SensorEventListener {
-            override fun onSensorChanged(event: android.hardware.SensorEvent) {
+            override fun onSensorChanged(event: SensorEvent) {
                 val lightLevel = event.values[0]
-                val style = if (lightLevel < LIGHT_THRESHOLD) R.raw.style1 else R.raw.retro
-                try {
-                    val success = mMap.setMapStyle(
-                        com.google.android.gms.maps.model.MapStyleOptions.loadRawResourceStyle(
-                            this@MapsActivity, style
-                        )
-                    )
-                    if (!success) Log.e("MAP_STYLE", "Style parsing failed.")
-                } catch (e: Exception) {
-                    Log.e("MAP_STYLE", "Can't find style. Error: ", e)
-                }
+                // Aquí podrías cambiar el estilo del mapa OSM si fuera necesario
             }
 
             override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
         }
 
-        sensorManager.registerListener(lightSensorListener, lightSensor, SensorManager.SENSOR_DELAY_NORMAL)
+        // Configurar click largo en el mapa para crear un marcador y una ruta
+        setupMapLongClick()
+
+        // Solicitar permisos de ubicación
+        requestLocationPermission()
+    }
+
+    private fun setupMyLocation() {
+        myLocationOverlay = MyLocationNewOverlay(GpsMyLocationProvider(this), binding.map)
+        myLocationOverlay?.enableMyLocation()
+        myLocationOverlay?.enableFollowLocation()
+        binding.map.overlays.add(myLocationOverlay)
+    }
+
+    private fun setupMapLongClick() {
+        val gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onLongPress(e: MotionEvent) {
+                // Convertir punto de pantalla a coordenadas geográficas
+                val x = e.x.toInt()
+                val y = e.y.toInt()
+                val iGeoPoint = binding.map.projection.fromPixels(x, y)
+                val geoPoint = GeoPoint(iGeoPoint.latitude, iGeoPoint.longitude)
+
+                // Crear un marcador en el punto seleccionado
+                val marker = Marker(binding.map)
+                marker.position = geoPoint
+                marker.title = "Destino"
+
+                // Limpiar marcadores anteriores (excepto el de ubicación)
+                val overlaysToRemove = binding.map.overlays.filterIsInstance<Marker>().filter { it != myLocationOverlay }
+                binding.map.overlays.removeAll(overlaysToRemove)
+
+                // Agregar el nuevo marcador
+                binding.map.overlays.add(marker)
+
+                // Dibujar la ruta desde la posición actual hasta el punto seleccionado
+                currentLocation?.let {
+                    drawRoute(it, geoPoint)
+                }
+
+                // Refrescar el mapa
+                binding.map.invalidate()
+            }
+        })
+
+        binding.map.setOnTouchListener { v, event ->
+            gestureDetector.onTouchEvent(event)
+            false  // Permitir que el evento se propague
+        }
     }
 
     private fun requestLocationPermission() {
@@ -155,15 +199,12 @@ class MapsActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private fun enableUserLocation() {
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
-            mMap.isMyLocationEnabled = true
-            mMap.uiSettings.isZoomControlsEnabled = true
-            mMap.uiSettings.isMyLocationButtonEnabled = true
+            myLocationOverlay?.enableMyLocation()
 
             mFusedLocationClient.lastLocation.addOnSuccessListener { location: Location? ->
                 location?.let {
-                    val latLng = LatLng(it.latitude, it.longitude)
-                    mMap.moveCamera(CameraUpdateFactory.newLatLngZoom(latLng, 16f))
-                    mMap.addMarker(MarkerOptions().position(latLng).title("Tu ubicación"))
+                    currentLocation = GeoPoint(it.latitude, it.longitude)
+                    binding.map.controller.setCenter(currentLocation)
 
                     // Establecer la primera ubicación guardada
                     if (lastSavedLocation == null) {
@@ -181,48 +222,71 @@ class MapsActivity : AppCompatActivity(), OnMapReadyCallback {
         }
     }
 
-    override fun onMapReady(googleMap: GoogleMap) {
-        mMap = googleMap
-        requestLocationPermission()
-        enableUserLocation()
-
-        mMap.setOnMapLongClickListener { latLng ->
+    private fun searchAddressAndDrawRoute(addressString: String) {
+        if (addressString.isNotEmpty()) {
             try {
-                val addresses = mGeocoder.getFromLocation(latLng.latitude, latLng.longitude, 1)
-                val addressText = if (!addresses.isNullOrEmpty()) {
-                    val address = addresses[0]
-                    val street = address.thoroughfare ?: ""
-                    val city = address.locality ?: ""
-                    val country = address.countryName ?: ""
-                    "$street, $city, $country".trim().replace(", ,", ",").replace(" ,", "")
-                } else {
-                    "Dirección no disponible"
-                }
+                val addresses = mGeocoder.getFromLocationName(addressString, 2)
+                if (!addresses.isNullOrEmpty()) {
+                    val address: Address = addresses[0]
+                    val destinationPoint = GeoPoint(address.latitude, address.longitude)
 
-                val marker = mMap.addMarker(MarkerOptions().position(latLng).title(addressText))
-                marker?.showInfoWindow()
+                    // Crear un marcador en la dirección buscada
+                    val marker = Marker(binding.map)
+                    marker.position = destinationPoint
+                    marker.title = address.locality ?: addressString
 
-                if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
-                    mFusedLocationClient.lastLocation.addOnSuccessListener { location ->
-                        location?.let {
-                            val userLocation = Location("").apply {
-                                latitude = it.latitude
-                                longitude = it.longitude
-                            }
-                            val markerLocation = Location("").apply {
-                                latitude = latLng.latitude
-                                longitude = latLng.longitude
-                            }
-                            val distanceInKm = userLocation.distanceTo(markerLocation) / 1000
-                            Toast.makeText(this, "Distancia hasta el marcador: %.2f km".format(distanceInKm), Toast.LENGTH_LONG).show()
-                        }
+                    // Limpiar marcadores anteriores
+                    val overlaysToRemove = binding.map.overlays.filterIsInstance<Marker>().filter { it != myLocationOverlay }
+                    binding.map.overlays.removeAll(overlaysToRemove)
+
+                    // Agregar el nuevo marcador
+                    binding.map.overlays.add(marker)
+
+                    // Centrar el mapa en el destino
+                    binding.map.controller.animateTo(destinationPoint)
+
+                    // Dibujar la ruta
+                    currentLocation?.let {
+                        drawRoute(it, destinationPoint)
                     }
+                } else {
+                    Toast.makeText(this, "No se pudo encontrar la dirección", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
-                Log.e("GEOCODER", "Error al obtener dirección desde lat/lng: ${e.message}")
-                Toast.makeText(this, "No se pudo obtener la dirección", Toast.LENGTH_SHORT).show()
+                Log.e("GEOCODER", "Error al obtener la dirección: ${e.message}")
             }
         }
+    }
+
+    private fun drawRoute(start: GeoPoint, finish: GeoPoint) {
+        // Crear los puntos de la ruta
+        val routePoints = ArrayList<GeoPoint>()
+        routePoints.add(start)
+        routePoints.add(finish)
+
+        // Obtener la ruta
+        val road = roadManager.getRoad(routePoints)
+        Log.i("OSM_activity", "Route length: ${road.mLength} km")
+        Log.i("OSM_activity", "Duration: ${road.mDuration / 60} min")
+
+        // Eliminar ruta anterior si existe
+        roadOverlay?.let { binding.map.overlays.remove(it) }
+
+        // Crear y configurar la nueva ruta
+        roadOverlay = RoadManager.buildRoadOverlay(road)
+        roadOverlay?.outlinePaint?.color = Color.RED
+        roadOverlay?.outlinePaint?.strokeWidth = 10f
+
+        // Agregar la ruta al mapa
+        binding.map.overlays.add(roadOverlay)
+
+        // Refrescar el mapa
+        binding.map.invalidate()
+
+        // Mostrar información de la ruta
+        val distanceMsg = "Distancia: %.2f km".format(road.mLength)
+        val durationMsg = "Tiempo estimado: %.1f min".format(road.mDuration / 60)
+        Toast.makeText(this, "$distanceMsg\n$durationMsg", Toast.LENGTH_LONG).show()
     }
 
     private fun loadSavedLocations() {
@@ -238,14 +302,12 @@ class MapsActivity : AppCompatActivity(), OnMapReadyCallback {
         }
     }
 
-
     private fun shouldSaveLocation(newLocation: Location): Boolean {
         if (lastSavedLocation == null) return true
 
         val distance = lastSavedLocation!!.distanceTo(newLocation)
         return distance > DISTANCE_THRESHOLD
     }
-
 
     private fun saveLocationToFile(location: Location) {
         val locationData = LocationData(
@@ -266,5 +328,19 @@ class MapsActivity : AppCompatActivity(), OnMapReadyCallback {
         } catch (e: Exception) {
             Log.e("LOCATION", "Error saving location: ${e.message}")
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        binding.map.onResume()
+        sensorManager.registerListener(lightSensorListener, lightSensor, SensorManager.SENSOR_DELAY_NORMAL)
+        startLocationUpdates()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        binding.map.onPause()
+        sensorManager.unregisterListener(lightSensorListener)
+        mFusedLocationClient.removeLocationUpdates(mLocationCallback)
     }
 }
