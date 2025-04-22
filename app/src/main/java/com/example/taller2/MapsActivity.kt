@@ -25,6 +25,11 @@ import com.google.android.gms.maps.OnMapReadyCallback
 import com.google.android.gms.maps.SupportMapFragment
 import com.google.android.gms.maps.model.LatLng
 import com.google.android.gms.maps.model.MarkerOptions
+import org.json.JSONArray
+import java.io.BufferedWriter
+import java.io.File
+import java.io.FileWriter
+import java.util.Date
 
 class MapsActivity : AppCompatActivity(), OnMapReadyCallback {
 
@@ -38,7 +43,10 @@ class MapsActivity : AppCompatActivity(), OnMapReadyCallback {
     private lateinit var lightSensor: Sensor
     private lateinit var lightSensorListener: SensorEventListener
     private val LIGHT_THRESHOLD = 20f
-
+    private val DISTANCE_THRESHOLD = 30f // 30 metros para guardar nueva ubicación
+    private var lastSavedLocation: Location? = null
+    private var locationsArray = JSONArray()
+    private val FILENAME = "locations.json"
     private val locationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted ->
@@ -98,8 +106,20 @@ class MapsActivity : AppCompatActivity(), OnMapReadyCallback {
             override fun onLocationResult(locationResult: LocationResult) {
                 val location = locationResult.lastLocation ?: return
                 val latLng = LatLng(location.latitude, location.longitude)
-                mMap.clear()
-                mMap.addMarker(MarkerOptions().position(latLng).title("Mi ubicación"))
+
+                // Verificar si nos hemos movido más de 30 metros desde la última ubicación guardada
+                if (shouldSaveLocation(location)) {
+                    // Guardar la nueva ubicación
+                    saveLocationToFile(location)
+
+                    // Actualizar el marcador en el mapa
+                    mMap.clear()
+                    mMap.addMarker(MarkerOptions().position(latLng).title("Mi ubicación"))
+                    mMap.moveCamera(CameraUpdateFactory.newLatLngZoom(latLng, 16f))
+
+                    // Actualizar la última ubicación guardada
+                    lastSavedLocation = location
+                }
             }
         }
 
@@ -144,6 +164,12 @@ class MapsActivity : AppCompatActivity(), OnMapReadyCallback {
                     val latLng = LatLng(it.latitude, it.longitude)
                     mMap.moveCamera(CameraUpdateFactory.newLatLngZoom(latLng, 16f))
                     mMap.addMarker(MarkerOptions().position(latLng).title("Tu ubicación"))
+
+                    // Establecer la primera ubicación guardada
+                    if (lastSavedLocation == null) {
+                        lastSavedLocation = it
+                        saveLocationToFile(it)
+                    }
                 }
             }
         }
@@ -196,6 +222,49 @@ class MapsActivity : AppCompatActivity(), OnMapReadyCallback {
                 Log.e("GEOCODER", "Error al obtener dirección desde lat/lng: ${e.message}")
                 Toast.makeText(this, "No se pudo obtener la dirección", Toast.LENGTH_SHORT).show()
             }
+        }
+    }
+
+    private fun loadSavedLocations() {
+        try {
+            val file = File(getExternalFilesDir(null), FILENAME)
+            if (file.exists()) {
+                val jsonString = file.readText()
+                locationsArray = JSONArray(jsonString)
+                Log.i("LOCATION", "Loaded ${locationsArray.length()} locations from file")
+            }
+        } catch (e: Exception) {
+            Log.e("LOCATION", "Error loading locations: ${e.message}")
+        }
+    }
+
+
+    private fun shouldSaveLocation(newLocation: Location): Boolean {
+        if (lastSavedLocation == null) return true
+
+        val distance = lastSavedLocation!!.distanceTo(newLocation)
+        return distance > DISTANCE_THRESHOLD
+    }
+
+
+    private fun saveLocationToFile(location: Location) {
+        val locationData = LocationData(
+            Date(System.currentTimeMillis()),
+            location.latitude,
+            location.longitude
+        )
+
+        locationsArray.put(locationData.toJSON())
+
+        try {
+            val file = File(getExternalFilesDir(null), FILENAME)
+            Log.i("LOCATION", "Saving location to: $file")
+            val output = BufferedWriter(FileWriter(file))
+            output.write(locationsArray.toString())
+            output.close()
+            Toast.makeText(this, "Location saved", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Log.e("LOCATION", "Error saving location: ${e.message}")
         }
     }
 }
