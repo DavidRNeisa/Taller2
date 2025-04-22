@@ -69,5 +69,9 @@ dependencies {
     debugImplementation(libs.androidx.ui.test.manifest)
     implementation (libs.play.services.maps.v1802)
     implementation (libs.play.services.location)
+    // OSM
+    implementation("org.osmdroid:osmdroid-android:6.1.14")
+    // OSM Bonuspack para rutas
+    implementation("com.github.MKergall:osmbonuspack:6.9.0")
 
 }
